@@ -16,37 +16,39 @@ const int TILE_WIDTH = 16;	// 定义块block大小
 __global__ void MatrixMulSharedMemKernel_v1(float *A,
     float *B, float *C, int wA,
     int wB) {
-    
+    int N = wA;
+    int K = wB;
     int bx = blockIdx.x;
     int by = blockIdx.y;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     
-    int Crow = bx * blockDim.x + tx;
-    int Ccol = by * blockDim.y + ty;
+    int Crow = bx * blockDim.x + ty;
+    int Ccol = by * blockDim.y + tx;
     // 写入(Crow, Ccol)
 
     // 每次读取一个block的A和B
     // (Arow, Acol)
     int AleftRowPoint = bx * TILE_WIDTH;
     int AleftColPoint = 0;
-
+    int AEndColPoint = wA;
+    
     int BleftRowPoint = 0;
     int BleftColPoint = by * TILE_WIDTH;
 
     float cval = 0.0f;
 
-    for(; AleftColPoint < wA && BleftRowPoint < wB; AleftColPoint += TILE_WIDTH, BleftRowPoint += TILE_WIDTH) {
+    for(; AleftColPoint < AEndColPoint; AleftColPoint += TILE_WIDTH, BleftRowPoint += TILE_WIDTH) {
         __shared__ float As[TILE_WIDTH][TILE_WIDTH];
         __shared__ float Bs[TILE_WIDTH][TILE_WIDTH];
         if(AleftRowPoint + tx < wA && AleftColPoint + ty < wA) {
-            As[tx][ty] = A[(AleftRowPoint + tx) * wA + AleftColPoint + ty];
+            As[ty][tx] = A[(AleftRowPoint + ty) * wA + AleftColPoint + tx];
         } else {
             As[tx][ty] = 0.0f;
         }
 
-        if(BleftRowPoint + tx < wB && BleftColPoint + ty < wB) {
-            Bs[tx][ty] = B[(BleftRowPoint + tx) * wB + BleftColPoint + ty];
+       if(BleftRowPoint + tx < wB && BleftColPoint + ty < wB) {
+            Bs[ty][tx] = B[(BleftRowPoint + ty) * wB + BleftColPoint + tx];
         } else {
             Bs[tx][ty] = 0.0f;
         }
@@ -55,14 +57,74 @@ __global__ void MatrixMulSharedMemKernel_v1(float *A,
 
         #pragma unroll
         for(int k = 0; k < TILE_WIDTH; k++) {
-            cval += As[tx][k] * Bs[k][ty];
+            cval = fma(As[ty][k], Bs[k][tx], cval);
         }
+
+        __syncthreads();
     }
 
     if(Crow < wA && Ccol < wB) {
-        C[Crow * wB + Ccol] = cval;
+       C[Crow * wB + Ccol] = cval;
     }
 }
+
+
+
+// // each thread compute 16 elements
+// __global__ void MatrixMulSharedMemKernel_v2(float *A,
+//     float *B, float *C, int wA,
+//     int wB) {
+    
+//     int bx = blockIdx.x;
+//     int by = blockIdx.y;
+//     int tx = threadIdx.x;
+//     int ty = threadIdx.y;
+    
+//     int Crow = bx * blockDim.x + tx;
+//     int Ccol = by * blockDim.y + ty;
+//     // 写入(Crow, Ccol)
+
+//     // 每次读取一个block的A和B
+//     // (Arow, Acol)
+//     int AleftRowPoint = bx * TILE_WIDTH;
+//     int AleftColPoint = 0;
+
+//     int BleftRowPoint = 0;
+//     int BleftColPoint = by * TILE_WIDTH;
+
+//     float cval[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+//     for(int tile = 0; tile < TILE_WIDTH; tile++) {
+//       __shared__ float As[4][TILE_WIDTH][TILE_WIDTH];
+//       __shared__ float Bs[4][TILE_WIDTH][TILE_WIDTH];
+
+//       int t_idx_x = threadIdx.x * 4 + tile;
+//       int t_idx_y = threadIdx.y * 4 + tile;
+
+//       As[t_idx_x][t_idx_y] = A[AleftRowPoint * wA + t_idx_x * wA + t_idx_y];
+//       Bs[0][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y];
+//       Bs[1][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 1];
+//       Bs[2][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 2];
+//       Bs[3][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 3];
+
+//       __syncthreads();
+
+//       #pragma unroll
+//       for(int k = 0; k < TILE_WIDTH; k++) {
+//         cval[0] += As[t_idx_x][k] * Bs[0][k][t_idx_y];
+//         cval[1] += As[t_idx_x][k] * Bs[1][k][t_idx_y];
+//         cval[2] += As[t_idx_x][k] * Bs[2][k][t_idx_y];
+//         cval[3] += As[t_idx_x][k] * Bs[3][k][t_idx_y];
+//       }
+//     }
+
+//     if(Crow < wA && Ccol < wB) {
+//         C[Crow * wB + Ccol] = cval[0];
+//         C[Crow * wB + Ccol + 1] = cval[1];
+//         C[Crow * wB + Ccol + 2] = cval[2];
+//         C[Crow * wB + Ccol + 3] = cval[3];
+//     }
+// }
 
 //! For square matrices only
 __global__ void MatrixMulKernel(float* d_M, float* d_N, float* d_P, int width)
@@ -227,6 +289,8 @@ int main(int argc, char* argv[])
   cudaMemcpy(d_M, h_M, sizeM, cudaMemcpyHostToDevice);
   cudaMemcpy(d_N, h_N, sizeN, cudaMemcpyHostToDevice);
 
+  #define MatrixMulSharedMemKernel MatrixMulSharedMemKernel_v1
+
   // 添加 warmup
   {
     nvtxRangePushA("Warmup Start");
@@ -256,7 +320,7 @@ int main(int argc, char* argv[])
     for (int j = 0; j < nIter; j++) {
         //matrixMulCPU(reference, h_M, h_N, m, k, n);
         // MatrixMulKernel<<<grid, block>>>(d_M, d_N, d_P, m);
-        MatrixMulSharedMemKernel_v1<<<grid, block>>>(d_M, d_N, d_P, m, n);
+        MatrixMulSharedMemKernel<<<grid, block>>>(d_M, d_N, d_P, m, n);
         // cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, d_N, n, d_M, k, &beta, d_P, n);
     }
 
