@@ -16,15 +16,14 @@ const int TILE_WIDTH = 16;	// 定义块block大小
 __global__ void MatrixMulSharedMemKernel_v1(float *A,
     float *B, float *C, int wA,
     int wB) {
-    int N = wA;
-    int K = wB;
+
     int bx = blockIdx.x;
     int by = blockIdx.y;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     
-    int Crow = bx * blockDim.x + ty;
-    int Ccol = by * blockDim.y + tx;
+    int Crow = bx * TILE_WIDTH + ty;
+    int Ccol = by * TILE_WIDTH + tx;
     // 写入(Crow, Ccol)
 
     // 每次读取一个block的A和B
@@ -39,18 +38,18 @@ __global__ void MatrixMulSharedMemKernel_v1(float *A,
     float cval = 0.0f;
 
     for(; AleftColPoint < AEndColPoint; AleftColPoint += TILE_WIDTH, BleftRowPoint += TILE_WIDTH) {
-        __shared__ float As[TILE_WIDTH][TILE_WIDTH];
-        __shared__ float Bs[TILE_WIDTH][TILE_WIDTH];
-        if(AleftRowPoint + tx < wA && AleftColPoint + ty < wA) {
+        __shared__ float As[TILE_WIDTH+1][TILE_WIDTH+1];
+        __shared__ float Bs[TILE_WIDTH+1][TILE_WIDTH+1];
+        if(AleftRowPoint + ty < wA && AleftColPoint + tx < wA) {
             As[ty][tx] = A[(AleftRowPoint + ty) * wA + AleftColPoint + tx];
         } else {
-            As[tx][ty] = 0.0f;
+            As[ty][tx] = 0.0f;
         }
 
-       if(BleftRowPoint + tx < wB && BleftColPoint + ty < wB) {
+       if(BleftRowPoint + ty < wB && BleftColPoint + tx < wB) {
             Bs[ty][tx] = B[(BleftRowPoint + ty) * wB + BleftColPoint + tx];
         } else {
-            Bs[tx][ty] = 0.0f;
+            Bs[ty][tx] = 0.0f;
         }
 
         __syncthreads();
