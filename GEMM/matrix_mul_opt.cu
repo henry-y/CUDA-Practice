@@ -11,7 +11,7 @@
 #include <nvtx3/nvToolsExt.h>
 using namespace std;
 
-const int TILE_WIDTH = 16;	// 定义块block大小
+const int TILE_WIDTH = 64;	// 定义块block大小
 
 __global__ void MatrixMulSharedMemKernel_v1(float *A,
     float *B, float *C, int wA,
@@ -67,63 +67,62 @@ __global__ void MatrixMulSharedMemKernel_v1(float *A,
     }
 }
 
-
-
-// // each thread compute 16 elements
-// __global__ void MatrixMulSharedMemKernel_v2(float *A,
-//     float *B, float *C, int wA,
-//     int wB) {
+// each thread compute 8 elements
+__global__ void MatrixMulSharedMemKernel_v2(float *A,
+    float *B, float *C, int wA,
+    int wB) {
     
-//     int bx = blockIdx.x;
-//     int by = blockIdx.y;
-//     int tx = threadIdx.x;
-//     int ty = threadIdx.y;
-    
-//     int Crow = bx * blockDim.x + tx;
-//     int Ccol = by * blockDim.y + ty;
-//     // 写入(Crow, Ccol)
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x; // 64
 
-//     // 每次读取一个block的A和B
-//     // (Arow, Acol)
-//     int AleftRowPoint = bx * TILE_WIDTH;
-//     int AleftColPoint = 0;
+    const int TILE_C = 8; 
+    int wK = TILE_WIDTH / TILE_C;
+    int Ccol = bx * TILE_WIDTH;
+    int Crow = by * TILE_WIDTH;
+    __shared__ float As[64+1][8+1];
+    __shared__ float Bs[8+1][64+1];
+    float cval[TILE_C] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-//     int BleftRowPoint = 0;
-//     int BleftColPoint = by * TILE_WIDTH;
+    float *A_Left_Pointer = A + Crow * wA;
+    float *B_Left_Pointer = B + Ccol;
 
-//     float cval[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    C += (Crow * wB + Ccol);
 
-//     for(int tile = 0; tile < TILE_WIDTH; tile++) {
-//       __shared__ float As[4][TILE_WIDTH][TILE_WIDTH];
-//       __shared__ float Bs[4][TILE_WIDTH][TILE_WIDTH];
+    int innerColA = tx % wK;
+    int innerRowA = tx / wK;
+    int innerColB = tx % TILE_WIDTH;
+    int innerRowB = tx / TILE_WIDTH;
 
-//       int t_idx_x = threadIdx.x * 4 + tile;
-//       int t_idx_y = threadIdx.y * 4 + tile;
+    int threadCol = tx % TILE_WIDTH;
+    int threadRow = tx / TILE_WIDTH;
 
-//       As[t_idx_x][t_idx_y] = A[AleftRowPoint * wA + t_idx_x * wA + t_idx_y];
-//       Bs[0][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y];
-//       Bs[1][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 1];
-//       Bs[2][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 2];
-//       Bs[3][t_idx_x][t_idx_y] = B[BleftRowPoint * wB + t_idx_x * wB + t_idx_y + 3];
+    for(int tile_idx = 0; tile_idx < wA; tile_idx += TILE_C) {
 
-//       __syncthreads();
+        As[innerRowA][innerColA] = A_Left_Pointer[innerRowA * wA + innerColA];
+        Bs[innerRowB][innerColB] = B_Left_Pointer[innerRowB * wB + innerColB];
 
-//       #pragma unroll
-//       for(int k = 0; k < TILE_WIDTH; k++) {
-//         cval[0] += As[t_idx_x][k] * Bs[0][k][t_idx_y];
-//         cval[1] += As[t_idx_x][k] * Bs[1][k][t_idx_y];
-//         cval[2] += As[t_idx_x][k] * Bs[2][k][t_idx_y];
-//         cval[3] += As[t_idx_x][k] * Bs[3][k][t_idx_y];
-//       }
-//     }
+        __syncthreads();
 
-//     if(Crow < wA && Ccol < wB) {
-//         C[Crow * wB + Ccol] = cval[0];
-//         C[Crow * wB + Ccol + 1] = cval[1];
-//         C[Crow * wB + Ccol + 2] = cval[2];
-//         C[Crow * wB + Ccol + 3] = cval[3];
-//     }
-// }
+        A_Left_Pointer += wK;
+        B_Left_Pointer += wK * wB;
+
+        for(int bval_idx = 0; bval_idx < wK; bval_idx++) {
+          // 外积         
+          float b_tmp = Bs[bval_idx][threadCol];
+          for(int a_idx = 0; a_idx < TILE_C; a_idx++) {
+            cval[a_idx] = fma(As[threadRow * TILE_C + a_idx][bval_idx], b_tmp, cval[a_idx]);
+          }
+        }
+
+        __syncthreads();
+    }
+
+    for(int i = 0; i < TILE_C; i++) {
+      C[(threadRow * TILE_C + i) * wB + threadCol] = cval[i];
+    }
+
+}
 
 //! For square matrices only
 __global__ void MatrixMulKernel(float* d_M, float* d_N, float* d_P, int width)
@@ -249,13 +248,6 @@ int main(int argc, char* argv[])
   size_t sizeP = m * n * sizeof(float);
 
 
-  // Launch kernel 定义grid&block
-  dim3 grid((int)ceil(k*1.0 / TILE_WIDTH), (int)ceil(m*1.0/ TILE_WIDTH));
-  dim3 block(TILE_WIDTH, TILE_WIDTH);
-  
-  printf("Grid: (%d, %d)\n", grid.x, grid.y);
-  printf("Block: (%d, %d)\n", block.x, block.y);
-
   // Allocate host memory
   h_M = (float*) malloc(sizeM);
   h_N = (float*) malloc(sizeN);
@@ -288,8 +280,18 @@ int main(int argc, char* argv[])
   cudaMemcpy(d_M, h_M, sizeM, cudaMemcpyHostToDevice);
   cudaMemcpy(d_N, h_N, sizeN, cudaMemcpyHostToDevice);
 
-  #define MatrixMulSharedMemKernel MatrixMulSharedMemKernel_v1
+  #define MatrixMulSharedMemKernel MatrixMulSharedMemKernel_v2
 
+   // Launch kernel 定义grid&block
+  dim3 grid((int)ceil(k*1.0 / TILE_WIDTH), (int)ceil(m*1.0/ TILE_WIDTH));
+  dim3 block(TILE_WIDTH * TILE_WIDTH / 8);
+  
+  printf("Grid: (%d, %d)\n", grid.x, grid.y);
+  printf("Block(y, x): (%d, %d)\n", block.y, block.x);
+
+
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
   // 添加 warmup
   {
     nvtxRangePushA("Warmup Start");
@@ -313,8 +315,6 @@ int main(int argc, char* argv[])
     cublasHandle_t handle;
     cublasCreate(&handle);
 #endif
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
 
     for (int j = 0; j < nIter; j++) {
         //matrixMulCPU(reference, h_M, h_N, m, k, n);
@@ -360,6 +360,13 @@ int main(int argc, char* argv[])
 #ifdef USE_CUBLAS
   cublasDestroy(handle);
 #endif
+
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("CUDA Error: %s\n", cudaGetErrorString(err));
+      return -1;
+  }
 
   return 0;
 }
